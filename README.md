@@ -6,11 +6,7 @@ This project is designed to help validate queries from a `query.log` file agains
 
 If you need to upgrade from version X to version Y and want to ensure all your queries remain valid, you can generate a query log in version X and then run this script against version Y, using the query log from the previous version as input.
 
-## Usage
-
-### Driver
-
-Ensure you use the driver version that corresponds to the Neo4j version you're testing against. Set it in the `requirements.txt` file.
+## Setup
 
 First, install the requirements by running:
 
@@ -18,12 +14,32 @@ First, install the requirements by running:
 pip install -r requirements.txt
 ```
 
+### Driver
+
+Ensure you use the driver version that corresponds to the Neo4j version you're testing against. Set it in the `requirements.txt` file.
+
+## Usage
+
+##Options
+
+- `--input-path <path>` : path to either a Neo4j query.log file, a directory containing query.log files, or a single-column CSV file containing a list of cypher queries (for example `all_queries.csv` exported by the healthcheck).
+- `--output-path <path>` : directory where the results are written to.
+- Optional `--query-log-bolt-port <path>` : BOLT port of the server that executed the queries (defaults to 7687). Make sure it matches, so that the query.log files can be parsed (if query.log(s) are specified as input).
+- Optional `--neo4j-target-version <path>` : docker image tag of the `neo4j` image to test against. Defaults to `5-enterprise`. Refer to https://hub.docker.com/_/neo4j for the list of available images.
+
+
+As an alternative to using `--neo4j-target-version`, you can provide connection details to an already running Ne4oj instance to test against :
+- `--uri <uri>` : neo4j URI (ex: neo4j://host:7687)
+- `--username <name>` : username of the user used to cnnect to that existing neo4j server
+- `--password <pwd>` : password of that user
+
+
 ## Local Neo4j Instance
 
 If you have a running Neo4j instance you want to test against, use the following command:
 
 ```bash
-python3 query-verifier.py --input-path=$QUERY_LOGS_PATH --output-path=$RESULT_OUTPUT_PATH --uri=$NEO4J_URI --username=$NEO4J_USERNAME --password=$NEO4J_PASSWORD --query-log-bolt-port=7687
+python3 query-verifier.py --input-path=$QUERY_LOGS_PATH --output-path=$RESULT_OUTPUT_PATH --uri=$NEO4J_URI --username=$NEO4J_USERNAME --password=$NEO4J_PASSWORD
 ```
 
 ## Docker Neo4j Instance
@@ -31,12 +47,8 @@ python3 query-verifier.py --input-path=$QUERY_LOGS_PATH --output-path=$RESULT_OU
 You can validate against any Neo4j version by choosing the version to run as a Docker container:
 
 ```bash
-python3 query-verifier.py --input-path=$QUERY_LOGS_PATH --output-path=$RESULT_OUTPUT_PATH --neo4j-target-version=5.19.0-enterprise --query-log-bolt-port=7687
+python3 query-verifier.py --input-path=$QUERY_LOGS_PATH --output-path=$RESULT_OUTPUT_PATH --neo4j-target-version=5.19.0-enterprise
 ```
-
-### Important:
-
-Ensure the `BOLT` port in your query log file corresponds to the one passed to the `--query-log-bolt-port` parameter.
 
 ## Execution Results
 

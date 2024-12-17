@@ -22,7 +22,7 @@ def cli():
     pass
 
 @cli.command()
-@click.option('--input-path', required=True, help='Import path for query.log files')
+@click.option('--input-path', required=True, help='Import path : either directory containing query.log files, or CSV file containing list of queries')
 @click.option('--output-path', required=True, help='Output path for verified files')
 @click.option('--query-log-bolt-port', required=True, default= '7687', help='The BOLT port found in the query.log file')
 @click.option('--uri', help='Neo4j URI instance')
@@ -35,6 +35,7 @@ def verify_queries_and_generate_reports(input_path, output_path, query_log_bolt_
         click.echo("Error: Both --uri and --neo4j-target-version cannot be set simultaneously.")
         return
 
+    mode = determine_mode(input_path)
     os.makedirs(output_path, exist_ok=True)
 
     try:
@@ -50,8 +51,14 @@ def verify_queries_and_generate_reports(input_path, output_path, query_log_bolt_
             neo4j_password="admin1234"
             container = start_container(neo4j_target_version, neo4j_username, neo4j_password, neo4j_uri)
 
-    
-        all_queries = read_queries(input_path, query_log_bolt_port)
+        if mode == "log_dir":
+            all_queries = read_queries(input_path, query_log_bolt_port)
+        elif mode == "csv":
+            with open(input_path, 'r', newline='', encoding='utf-8') as csvfile:
+                all_queries = [row[0] for row in csv.reader(csvfile) if row]
+        elif mode == "log":
+            all_queries = read_query_file(input_path, query_log_bolt_port)
+
 
         print(f"Testing queries against {neo4j_uri}...")
         failed_queries, deprecated_queries = execute_queries(all_queries, neo4j_username, neo4j_password, neo4j_uri)
@@ -68,6 +75,23 @@ def verify_queries_and_generate_reports(input_path, output_path, query_log_bolt_
     finally:
         if container is not None:
             container.remove(force=True)
+
+def determine_mode(input_path):
+    mode=""
+    if os.path.isdir(input_path):
+        mode = "log_dir"
+    elif os.path.isfile(input_path):
+        # Extract file extension
+        _, extension = os.path.splitext(input_path)
+        if extension == ".csv":
+            mode = "csv"
+        elif extension == ".log":
+            mode = "log"
+    else:
+        click.echo("Error: Could not determine the content of --input-path value.")
+        exit(1)
+    print(f"Input mode: {mode}")
+    return mode
 
 def start_container(neo4j_target_version, neo4j_username, neo4j_password, neo4j_uri):
     bolt_port=neo4j_uri.split(":")[2]
@@ -129,9 +153,6 @@ def detect_format(file_path):
                 return "STD"
             elif first_line.startswith("{"):
                 return "JSON"
-            #TODO : read CSV files with already parsed list of distinct queries (post healthcheck for example)
-            # elif first_line == "headers_line_tbd":
-            #     return "CSV"
             break
     return "unknown"
 
@@ -144,31 +165,37 @@ def read_queries(input_path, query_log_bolt_port):
 
     #parsing queries
     print(f"Parsing query logs from {input_path}...")
-    files = [f for f in os.listdir(input_path) if isfile(join(input_path, f))]
+    files = [f for f in os.listdir(input_path) if isfile(join(input_path, f)) and f.startswith("query")]
+    print(files)
     for log in sorted(files):
-        if log.startswith("query"):
-            queries = set()
-            format = detect_format(join(input_path, log))
-            print(f"Reading {log} [{format}]...")
-            with open(join(input_path, log), 'r') as input_file:
-                for row in input_file:
-                    if format == "STD":
-                        #TODO : deal with multiline queries
-                        #TODO : filter out 'Transaction started', 'Transaction committed', "Transaction rolled back" events and "Query started" events
-                        match = re.search(pattern, row)
-                        if match:
-                            result = match.group(1).strip()
-                            #set : don't store duplicate queries
-                            queries.add(result)
-                    elif format == "JSON":
-                        dict = json.loads(row)
-                        if "query" in dict:
-                            queries.add(dict["query"])
-                    #TODO : aggregate client/driver label + source IP information in order to help find the emitter
-            print(f"Parsed {len(queries)} distinct queries")
-            all_queries.update(queries)
+        queries = read_query_file(join(input_path, log), query_log_bolt_port)
+        all_queries.update(queries)
     print(f"Parsed a total of {len(all_queries)} distinct queries")
     return all_queries
+
+def read_query_file(log, query_log_bolt_port):
+    queries = set()
+    log_format = f"{query_log_bolt_port}>\\s*[^ ]+\\s*-\\s*[^ ]+\\s+-\\s*(.*?)\\s*-\\s*{{"
+    pattern = re.compile(log_format)
+    format = detect_format(log)
+    print(f"Reading {log} [{format}]...")
+    with open(log, 'r') as input_file:
+        for row in input_file:
+            if format == "STD":
+                #TODO : deal with multiline queries
+                #TODO : filter out 'Transaction started', 'Transaction committed', "Transaction rolled back" events and "Query started" events
+                match = re.search(pattern, row)
+                if match:
+                    result = match.group(1).strip()
+                    #set : don't store duplicate queries
+                    queries.add(result)
+            elif format == "JSON":
+                dict = json.loads(row)
+                if "query" in dict:
+                    queries.add(dict["query"])
+            #TODO : aggregate client/driver label + source IP information in order to help find the emitter
+    print(f"Parsed {len(queries)} distinct queries")
+    return queries
 
 def execute_queries(all_queries, neo4j_username, neo4j_password, neo4j_uri):
     with GraphDatabase.driver(neo4j_uri, auth=(neo4j_username, neo4j_password)) as driver:
