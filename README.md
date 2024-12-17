@@ -20,7 +20,7 @@ Ensure you use the driver version that corresponds to the Neo4j version you're t
 
 ## Usage
 
-##Options
+## Options
 
 - `--input-path <path>` : path to either a Neo4j query.log file, a directory containing query.log files, or a single-column CSV file containing a list of cypher queries (for example `all_queries.csv` exported by the healthcheck).
 - `--output-path <path>` : directory where the results are written to.
