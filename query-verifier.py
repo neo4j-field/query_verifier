@@ -9,6 +9,7 @@ import os
 from os.path import isfile, join
 import docker
 import time
+import hashlib
 from datetime import datetime
 
 IGNORE_LIST = ['Neo.ClientNotification.Statement.UnknownPropertyKeyWarning',
@@ -16,7 +17,12 @@ IGNORE_LIST = ['Neo.ClientNotification.Statement.UnknownPropertyKeyWarning',
                'Neo.ClientError.Statement.ParameterMissing',
                'Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning',
                'Neo.ClientNotification.Statement.UnknownLabelWarning',
-               'Neo.ClientNotification.Schema.HintedIndexNotFound']
+               'Neo.ClientNotification.Schema.HintedIndexNotFound',
+               'Neo.ClientError.Schema.IndexNotFound',
+               'Neo.ClientError.Procedure.ProcedureNotFound',
+               'Neo.ClientNotification.Statement.CartesianProductWarning']
+
+#
 
 @click.group
 def cli():
@@ -62,8 +68,8 @@ def verify_queries_and_generate_reports(input_path, output_path, query_log_bolt_
 
         #build timestmap to the second
         timestamp=f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        write_output(output_path, f"deprecated_queries_{timestamp}.csv", deprecated_queries)
-        write_output(output_path, f"failed_queries_{timestamp}.csv", failed_queries)
+        write_output(output_path, f"deprecated_queries_{neo4j_target_version}_{timestamp}.csv", deprecated_queries)
+        write_output(output_path, f"failed_queries_{neo4j_target_version}_{timestamp}.csv", failed_queries)
 
 
         if container is not None:
@@ -212,20 +218,33 @@ def execute_queries(all_queries, neo4j_username, neo4j_password, neo4j_uri):
                     #print(f"Testing query '{query}'...")
                     records, summary, keys = driver.execute_query("EXPLAIN " + query)
                     if summary.notifications:
-                        for notif in summary.notifications:
+                        for notif in summary.notifications: # alternatively summary.summary_notifications in 5.7+ (https://neo4j.com/docs/api/python-driver/current/api.html#neo4j.SummaryNotification)
                             if notif['code'] not in IGNORE_LIST: #TODO: filter on category DEPRECATION
-                                #TODO: deal with v4 (no category)
-                                #TODO: add title + severity to output
-                                #v4  {  'severity': 'WARNING', 
-                                #       'description': 'Did not supply query with enough parameters. The produced query plan will not be cached and is not executable without EXPLAIN. (Missing parameters: name)', 
-                                #       'code': 'Neo.ClientError.Statement.ParameterMissing', 
-                                #       'title': 'The statement refers to a parameter that was not provided in the request.'
-                                #    }
-                                category=notif['category'] if 'category' in notif else "N/A"
-                                print(f"Found deprecated cypher : [{notif['code']}] {category} - {notif['description']}")
-                                deprecated_queries.append({'query': query, 'category': category, 'message': notif['description']})
+                                result_row= {
+                                    'query_hash': hashlib.md5(query.encode('utf-8')).hexdigest(),
+                                    'query': query,
+                                    'severity': notif['severity']           if 'severity' in notif else "N/A",
+                                    'category': notif['category']           if 'category' in notif else "N/A",
+                                    'code': notif['code']                   if 'code' in notif else "N/A",
+                                    'title': notif['title']                 if 'title' in notif else "N/A",
+                                    'description': notif['description']     if 'description' in notif else "N/A",
+                                    'position': notif['position']           if 'position' in notif else "N/A"
+                                }
+                                # print(f"Found deprecated cypher : [{notif['code']}] - {notif['description']}")
+                                deprecated_queries.append(result_row)
                 except neo4j.exceptions.ClientError as e:
-                    failed_queries.append({'query': query, 'category': e.category, 'message': e.message})
+                    # print(dir(e))
+                    # print(f"Failed query : {e}")
+                    result_row= {
+                        'query_hash': hashlib.md5(query.encode('utf-8')).hexdigest(),
+                        'query': query,
+                        'classification': e.classification,
+                        'category': e.category,
+                        'code': e.code,
+                        'title': e.title,
+                        'message': e.message
+                    }
+                    failed_queries.append(result_row)
                 i+=1
                 if i % 1000 == 0:
                     print(f"{i} queries tested")
@@ -235,7 +254,7 @@ def execute_queries(all_queries, neo4j_username, neo4j_password, neo4j_uri):
 def write_output(output_path, output_file_name, output):
     print(f"Writing output to {output_path}/{output_file_name}")
     with open(output_path+'/'+output_file_name, 'w', newline='') as output_file:
-        dict_writer = csv.DictWriter(output_file, ['query', 'category', 'message'])
+        dict_writer = csv.DictWriter(output_file, output[0].keys())
         dict_writer.writeheader()
         dict_writer.writerows(output)
 
