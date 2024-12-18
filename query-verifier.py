@@ -13,6 +13,7 @@ from datetime import datetime
 
 IGNORE_LIST = ['Neo.ClientNotification.Statement.UnknownPropertyKeyWarning',
                'Neo.ClientNotification.Statement.ParameterNotProvided',
+               'Neo.ClientError.Statement.ParameterMissing',
                'Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning',
                'Neo.ClientNotification.Statement.UnknownLabelWarning',
                'Neo.ClientNotification.Schema.HintedIndexNotFound']
@@ -30,10 +31,6 @@ def cli():
 @click.option('--password', help='Neo4j URI password')
 @click.option('--neo4j-target-version', default='5-enterprise', help='Neo4j target version (docker image tag)')
 def verify_queries_and_generate_reports(input_path, output_path, query_log_bolt_port, uri, username, password, neo4j_target_version):
-    
-    if uri and neo4j_target_version:
-        click.echo("Error: Both --uri and --neo4j-target-version cannot be set simultaneously.")
-        return
 
     mode = determine_mode(input_path)
     os.makedirs(output_path, exist_ok=True)
@@ -44,7 +41,7 @@ def verify_queries_and_generate_reports(input_path, output_path, query_log_bolt_
         neo4j_password=password
 
         container = None
-        if (neo4j_target_version):
+        if (neo4j_target_version and not uri):
             print(f"No existing neo4j server details provided. Starting a new one locally in docker...")
             neo4j_uri="bolt://127.0.0.1:17687"
             neo4j_username="neo4j"
@@ -95,27 +92,33 @@ def determine_mode(input_path):
 
 def start_container(neo4j_target_version, neo4j_username, neo4j_password, neo4j_uri):
     bolt_port=neo4j_uri.split(":")[2]
-    healthcheck = {
-        "Test": ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"],
-        "Interval": 30000000000,  # 30 seconds in nanoseconds
-        "Timeout": 20000000000,   # 20 seconds in nanoseconds
-        "Retries": 10,
-        "StartPeriod": 60000000000  # 60 seconds in nanoseconds
-    }
     client = docker.from_env()
     docker_image=f'neo4j:{neo4j_target_version}'
+    if neo4j_target_version.startswith("4"):
+        plugins='["apoc","graph-data-science", "n10s"]'
+    else:
+        plugins='["apoc","apoc-extended","graph-data-science", "n10s"]'
     print(f"Pulling docker image {docker_image}...")
     client.images.pull(docker_image)
     print(f"Running docker container from image {docker_image}...")
     container = client.api.create_container(
         image=docker_image,
-        environment=["NEO4J_ACCEPT_LICENSE_AGREEMENT=yes", f"NEO4J_AUTH={neo4j_username}/{neo4j_password}"],
+        environment=["NEO4J_ACCEPT_LICENSE_AGREEMENT=yes", 
+                     f"NEO4J_AUTH={neo4j_username}/{neo4j_password}",
+                     f'NEO4J_PLUGINS={plugins}'
+                    ],
         ports={"7687/tcp": {}, "7474/tcp": {}},
         host_config=client.api.create_host_config(port_bindings={
             "7687/tcp": ('127.0.0.1', bolt_port),
             "7474/tcp": ('127.0.0.1', 17474)
         }),
-        healthcheck=healthcheck,
+        healthcheck={
+            "Test": ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"],
+            "Interval": 30000000000,  # 30 seconds in nanoseconds
+            "Timeout": 20000000000,   # 20 seconds in nanoseconds
+            "Retries": 10,
+            "StartPeriod": 60000000000  # 60 seconds in nanoseconds
+        },
         name="query_verifier"
     )
     
@@ -204,19 +207,28 @@ def execute_queries(all_queries, neo4j_username, neo4j_password, neo4j_uri):
         deprecated_queries = []
         i=0
         for query in all_queries:
-            try:
-                #print(f"Testing query '{query}'...")
-                records, summary, keys = driver.execute_query("EXPLAIN " + query)
-                if summary.notifications:
-                    for notif in summary.notifications:
-                        if notif['code'] not in IGNORE_LIST:
-                            print(f"Found deprecated cypher : {notif['code']} {notif['category']} {notif['description']}")
-                            deprecated_queries.append({'query': query, 'category': notif['category'], 'message': notif['description']})
-            except neo4j.exceptions.ClientError as e:
-                failed_queries.append({'query': query, 'category': e.category, 'message': e.message})
-            i+=1
-            if i % 1000 == 0:
-                print(f"{i} queries tested")
+            if not query.startswith("EXPLAIN ") and not query.startswith("PROFILE "):
+                try:
+                    #print(f"Testing query '{query}'...")
+                    records, summary, keys = driver.execute_query("EXPLAIN " + query)
+                    if summary.notifications:
+                        for notif in summary.notifications:
+                            if notif['code'] not in IGNORE_LIST: #TODO: filter on category DEPRECATION
+                                #TODO: deal with v4 (no category)
+                                #TODO: add title + severity to output
+                                #v4  {  'severity': 'WARNING', 
+                                #       'description': 'Did not supply query with enough parameters. The produced query plan will not be cached and is not executable without EXPLAIN. (Missing parameters: name)', 
+                                #       'code': 'Neo.ClientError.Statement.ParameterMissing', 
+                                #       'title': 'The statement refers to a parameter that was not provided in the request.'
+                                #    }
+                                category=notif['category'] if 'category' in notif else "N/A"
+                                print(f"Found deprecated cypher : [{notif['code']}] {category} - {notif['description']}")
+                                deprecated_queries.append({'query': query, 'category': category, 'message': notif['description']})
+                except neo4j.exceptions.ClientError as e:
+                    failed_queries.append({'query': query, 'category': e.category, 'message': e.message})
+                i+=1
+                if i % 1000 == 0:
+                    print(f"{i} queries tested")
         print(f"All queried tested")
     return failed_queries, deprecated_queries
 

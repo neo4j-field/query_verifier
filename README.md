@@ -2,9 +2,11 @@
 
 ## Intent
 
-This project is designed to help validate queries from a `query.log` file against a specific Neo4j version.
+This project is designed to help validate cypher queries against a specific Neo4j version.
 
-If you need to upgrade from version X to version Y and want to ensure all your queries remain valid, you can generate a query log in version X and then run this script against version Y, using the query log from the previous version as input.
+If you need to upgrade from version X to version Y and want to ensure all your queries remain valid, you can collect query logs from version X and then run this script against version Y.
+
+By default the script will start a neo4j version Y container and send it each distinct query it found in the inputs.
 
 ## Setup
 
@@ -20,16 +22,31 @@ Ensure you use the driver version that corresponds to the Neo4j version you're t
 
 ## Usage
 
+```bash
+python3 query-verifier.py --input-path=$INPUT_PATH --output-path=$RESULT_OUTPUT_PATH
+```
+
 ## Options
 
-- `--input-path <path>` : path to either a Neo4j query.log file, a directory containing query.log files, or a single-column CSV file containing a list of cypher queries (for example `all_queries.csv` exported by the healthcheck).
-- `--output-path <path>` : directory where the results are written to.
-- Optional `--query-log-bolt-port <path>` : BOLT port of the server that executed the queries (defaults to 7687). Make sure it matches, so that the query.log files can be parsed (if query.log(s) are specified as input).
-- Optional `--neo4j-target-version <path>` : docker image tag of the `neo4j` image to test against. Defaults to `5-enterprise`. Refer to https://hub.docker.com/_/neo4j for the list of available images.
+- `--input-path <path>` : path to either 
+  - a Neo4j query.log file (either in standard or json format), 
+  - a directory containing query.log files, or 
+  - a single-column CSV file containing a list of cypher queries (for example `all_queries.csv` exported by the healthcheck). cf.`example/all_queries.csv`.
+  
+  Note that the reliability of the parsing of raw query logs is not guaranteed. It is therefore recommended to use the CSV option.
+- `--output-path <path>` : directory where the results are written to. Two files will be generated :
+  - `deprecated_queries.csv` : list of queries with deprecation warnings
+  - `failed_queries.csv` : list of queries that outright failed
+- Optional `--query-log-bolt-port <port>` : BOLT port of the server that executed the queries.
+  - Defaults to 7687. 
+  - if standard format query.log(s) are specified as input, make sure the port matches, as the parsing relies on it (note : that option is not used for CSV or JSON query.log inputs).
+- Optional `--neo4j-target-version <image-tag>` : docker image tag of the `neo4j` image to test against. 
+  - Defaults to `5-enterprise`. 
+  - Refer to https://hub.docker.com/_/neo4j for the list of available images.
 
 
 As an alternative to using `--neo4j-target-version`, you can provide connection details to an already running Ne4oj instance to test against :
-- `--uri <uri>` : neo4j URI (ex: neo4j://host:7687)
+- `--uri <uri>` : neo4j URI (ex: neo4j://host:7687).
 - `--username <name>` : username of the user used to cnnect to that existing neo4j server
 - `--password <pwd>` : password of that user
 
@@ -39,7 +56,7 @@ As an alternative to using `--neo4j-target-version`, you can provide connection 
 If you have a running Neo4j instance you want to test against, use the following command:
 
 ```bash
-python3 query-verifier.py --input-path=$QUERY_LOGS_PATH --output-path=$RESULT_OUTPUT_PATH --uri=$NEO4J_URI --username=$NEO4J_USERNAME --password=$NEO4J_PASSWORD
+python3 query-verifier.py --input-path=some/path//logs --output-path=/path/to/output --uri=neo4j://localhost:7687 --username=neo4j --password=mypassword
 ```
 
 ## Docker Neo4j Instance
@@ -47,7 +64,7 @@ python3 query-verifier.py --input-path=$QUERY_LOGS_PATH --output-path=$RESULT_OU
 You can validate against any Neo4j version by choosing the version to run as a Docker container:
 
 ```bash
-python3 query-verifier.py --input-path=$QUERY_LOGS_PATH --output-path=$RESULT_OUTPUT_PATH --neo4j-target-version=5.19.0-enterprise
+python3 query-verifier.py --input-path=example/all_queries.csv --output-path=./output --neo4j-target-version=5.19.0-enterprise
 ```
 
 ## Execution Results
