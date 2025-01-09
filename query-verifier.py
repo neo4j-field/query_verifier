@@ -1,6 +1,7 @@
 import click
 import re
 import csv
+import sys
 import json
 from neo4j import GraphDatabase
 import neo4j
@@ -22,7 +23,6 @@ IGNORE_LIST = ['Neo.ClientNotification.Statement.UnknownPropertyKeyWarning',
                'Neo.ClientError.Procedure.ProcedureNotFound',
                'Neo.ClientNotification.Statement.CartesianProductWarning']
 
-csv.field_size_limit(6000000)  # Increase the field size limit to avoid "field larger than field limit" error
 #
 
 @click.group
@@ -227,14 +227,34 @@ def read_query_file(log, query_log_bolt_port):
 
 def read_csv_file(csv_file_path):
     queries = []
+    current_limit = csv.field_size_limit()
+    max_limit = sys.maxsize  # Maximum possible limit
     with open(csv_file_path, 'r', newline='', encoding='utf-8') as csvfile:
         try:
             reader = csv.reader(csvfile)
             for row in reader:
-                queries.append(row[0])
+                queries.append(row[0].replace("<br>", "\n"))
         except csv.Error as e:
             click.echo(f"Error reading CSV file: {e}")
-            exit(1)
+            #click.echo(f"Last successfully read line : {row}")
+            #increase csv.field_size_limit gradually until it works
+            while True:
+                current_limit *= 2
+                csv.field_size_limit(current_limit)
+                click.echo(f"Doubled CSV field size limit to: {current_limit}")
+                try:
+                    # Retry processing the file
+                    with open(csv_file_path, 'r', newline='', encoding='utf-8') as csvfile:
+                        reader = csv.reader(csvfile)
+                        for row in reader:
+                            queries.append(row[0].replace("<br>", "\n")) # Replace HTML line breaks with actual line breaks
+                    break  # Exit the loop once processing succeeds
+                except csv.Error as e:
+                    print(f"Still encountering an error: {e}")
+                    if current_limit >= max_limit:
+                        print("Reached maximum field size limit. Cannot process this file.")
+                        exit(1)
+    print("CSV file processed successfully!")
     return queries
 
 def execute_queries(all_queries, neo4j_username, neo4j_password, neo4j_uri):
