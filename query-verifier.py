@@ -22,6 +22,7 @@ IGNORE_LIST = ['Neo.ClientNotification.Statement.UnknownPropertyKeyWarning',
                'Neo.ClientError.Procedure.ProcedureNotFound',
                'Neo.ClientNotification.Statement.CartesianProductWarning']
 
+csv.field_size_limit(6000000)  # Increase the field size limit to avoid "field larger than field limit" error
 #
 
 @click.group
@@ -55,10 +56,9 @@ def verify_queries_and_generate_reports(input_path, output_path, query_log_bolt_
             container = start_container(neo4j_target_version, neo4j_username, neo4j_password, neo4j_uri)
 
         if mode == "log_dir":
-            all_queries = read_queries(input_path, query_log_bolt_port)
+            all_queries = read_directory(input_path, query_log_bolt_port)
         elif mode == "csv":
-            with open(input_path, 'r', newline='', encoding='utf-8') as csvfile:
-                all_queries = [row[0] for row in csv.reader(csvfile) if row]
+            all_queries = read_csv_file(input_path)
         elif mode == "log":
             all_queries = read_query_file(input_path, query_log_bolt_port)
 
@@ -104,42 +104,50 @@ def start_container(neo4j_target_version, neo4j_username, neo4j_password, neo4j_
         print(f"Error connecting to docker: {e}")
         exit(1)
     docker_image=f'neo4j:{neo4j_target_version}'
+
     if neo4j_target_version.startswith("4"):
         plugins='["apoc","graph-data-science", "n10s"]'
     else:
         plugins='["apoc","apoc-extended","graph-data-science", "n10s"]'
-    print(f"Pulling docker image {docker_image}...")
-    try:
-        client.images.pull(docker_image)
-    except docker.errors.ImageNotFound:
-        print(f"Image {docker_image} not found. Please check the version.")
-        exit(1)
-    except docker.errors.APIError as e:
-        print(f"Error pulling image {docker_image}: {e}")
-        exit(1)
+    #check if pull is needed
+    available_images = client.images.list(docker_image)
+    if len(available_images) == 0:
+        print(f"Pulling docker image {docker_image}...")
+        try:
+            client.images.pull(docker_image)
+        except docker.errors.ImageNotFound:
+            print(f"Image {docker_image} not found. Please check the version.")
+            exit(1)
+        except docker.errors.APIError as e:
+            print(f"Error pulling image {docker_image}: {e}")
+            exit(1)
     print(f"Running docker container from image {docker_image}...")
-    container = client.api.create_container(
-        image=docker_image,
-        environment=["NEO4J_ACCEPT_LICENSE_AGREEMENT=yes", 
-                     f"NEO4J_AUTH={neo4j_username}/{neo4j_password}",
-                     f'NEO4J_PLUGINS={plugins}'
-                    ],
-        ports={"7687/tcp": {}, "7474/tcp": {}},
-        host_config=client.api.create_host_config(port_bindings={
-            "7687/tcp": ('127.0.0.1', bolt_port),
-            "7474/tcp": ('127.0.0.1', 17474)
-        }),
-        healthcheck={
-            "Test": ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"],
-            "Interval": 30000000000,  # 30 seconds in nanoseconds
-            "Timeout": 20000000000,   # 20 seconds in nanoseconds
-            "Retries": 10,
-            "StartPeriod": 60000000000  # 60 seconds in nanoseconds
-        },
-        name="query_verifier"
-    )
-    
-    client.api.start(container['Id'])
+    try:
+        container = client.api.create_container(
+            image=docker_image,
+            environment=["NEO4J_ACCEPT_LICENSE_AGREEMENT=yes", 
+                        f"NEO4J_AUTH={neo4j_username}/{neo4j_password}",
+                        f'NEO4J_PLUGINS={plugins}'
+                        ],
+            ports={"7687/tcp": {}, "7474/tcp": {}},
+            host_config=client.api.create_host_config(port_bindings={
+                "7687/tcp": ('127.0.0.1', bolt_port),
+                "7474/tcp": ('127.0.0.1', 17474)
+            }),
+            healthcheck={
+                "Test": ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"],
+                "Interval": 30000000000,  # 30 seconds in nanoseconds
+                "Timeout": 20000000000,   # 20 seconds in nanoseconds
+                "Retries": 10,
+                "StartPeriod": 60000000000  # 60 seconds in nanoseconds
+            },
+            name="query_verifier"
+        )
+        
+        client.api.start(container['Id'])
+    except docker.errors.APIError as e:
+        print(f"Error starting container: {e}")
+        exit(1)
     container = client.containers.get(container['Id'])
 
     try:
@@ -176,7 +184,7 @@ def detect_format(file_path):
             break
     return "unknown"
 
-def read_queries(input_path, query_log_bolt_port):
+def read_directory(input_path, query_log_bolt_port):
     all_queries = set()
     #TODO : better regex
     # Make sure to change the pattern to match the BOLT port in your logs
@@ -215,6 +223,18 @@ def read_query_file(log, query_log_bolt_port):
                     queries.add(dict["query"])
             #TODO : aggregate client/driver label + source IP information in order to help find the emitter
     print(f"Parsed {len(queries)} distinct queries")
+    return queries
+
+def read_csv_file(csv_file_path):
+    queries = []
+    with open(csv_file_path, 'r', newline='', encoding='utf-8') as csvfile:
+        try:
+            reader = csv.reader(csvfile)
+            for row in reader:
+                queries.append(row[0])
+        except csv.Error as e:
+            click.echo(f"Error reading CSV file: {e}")
+            exit(1)
     return queries
 
 def execute_queries(all_queries, neo4j_username, neo4j_password, neo4j_uri):
