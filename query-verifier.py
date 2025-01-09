@@ -98,14 +98,25 @@ def determine_mode(input_path):
 
 def start_container(neo4j_target_version, neo4j_username, neo4j_password, neo4j_uri):
     bolt_port=neo4j_uri.split(":")[2]
-    client = docker.from_env()
+    try:
+        client = docker.from_env()
+    except docker.errors.DockerException as e:
+        print(f"Error connecting to docker: {e}")
+        exit(1)
     docker_image=f'neo4j:{neo4j_target_version}'
     if neo4j_target_version.startswith("4"):
         plugins='["apoc","graph-data-science", "n10s"]'
     else:
         plugins='["apoc","apoc-extended","graph-data-science", "n10s"]'
     print(f"Pulling docker image {docker_image}...")
-    client.images.pull(docker_image)
+    try:
+        client.images.pull(docker_image)
+    except docker.errors.ImageNotFound:
+        print(f"Image {docker_image} not found. Please check the version.")
+        exit(1)
+    except docker.errors.APIError as e:
+        print(f"Error pulling image {docker_image}: {e}")
+        exit(1)
     print(f"Running docker container from image {docker_image}...")
     container = client.api.create_container(
         image=docker_image,
@@ -211,52 +222,51 @@ def execute_queries(all_queries, neo4j_username, neo4j_password, neo4j_uri):
         driver.verify_connectivity()
         failed_queries = []
         deprecated_queries = []
-        i=0
-        for query in all_queries:
-            if not query.startswith("EXPLAIN ") and not query.startswith("PROFILE "):
-                try:
-                    #print(f"Testing query '{query}'...")
-                    records, summary, keys = driver.execute_query("EXPLAIN " + query)
-                    if summary.notifications:
-                        for notif in summary.notifications: # alternatively summary.summary_notifications in 5.7+ (https://neo4j.com/docs/api/python-driver/current/api.html#neo4j.SummaryNotification)
-                            if notif['code'] not in IGNORE_LIST: #TODO: filter on category DEPRECATION
-                                result_row= {
-                                    'query_hash': hashlib.md5(query.encode('utf-8')).hexdigest(),
-                                    'query': query,
-                                    'severity': notif['severity']           if 'severity' in notif else "N/A",
-                                    'category': notif['category']           if 'category' in notif else "N/A",
-                                    'code': notif['code']                   if 'code' in notif else "N/A",
-                                    'title': notif['title']                 if 'title' in notif else "N/A",
-                                    'description': notif['description']     if 'description' in notif else "N/A",
-                                    'position': notif['position']           if 'position' in notif else "N/A"
-                                }
-                                # print(f"Found deprecated cypher : [{notif['code']}] - {notif['description']}")
-                                deprecated_queries.append(result_row)
-                except neo4j.exceptions.ClientError as e:
-                    # print(dir(e))
-                    # print(f"Failed query : {e}")
-                    result_row= {
-                        'query_hash': hashlib.md5(query.encode('utf-8')).hexdigest(),
-                        'query': query,
-                        'classification': e.classification,
-                        'category': e.category,
-                        'code': e.code,
-                        'title': e.title,
-                        'message': e.message
-                    }
-                    failed_queries.append(result_row)
-                i+=1
-                if i % 1000 == 0:
-                    print(f"{i} queries tested")
-        print(f"All queried tested")
+
+        with click.progressbar(all_queries) as all_queries_progress:
+            for query in all_queries_progress:
+                if not query.startswith("EXPLAIN ") and not query.startswith("PROFILE "):
+                    try:
+                        #print(f"Testing query '{query}'...")
+                        records, summary, keys = driver.execute_query("EXPLAIN " + query)
+                        if summary.notifications:
+                            for notif in summary.notifications: # alternatively summary.summary_notifications in 5.7+ (https://neo4j.com/docs/api/python-driver/current/api.html#neo4j.SummaryNotification)
+                                if notif['code'] not in IGNORE_LIST: #TODO: filter on category DEPRECATION
+                                    result_row= {
+                                        'query_hash': hashlib.md5(query.encode('utf-8')).hexdigest(),
+                                        'query': query,
+                                        'severity': notif['severity']           if 'severity' in notif else "N/A",
+                                        'category': notif['category']           if 'category' in notif else "N/A",
+                                        'code': notif['code']                   if 'code' in notif else "N/A",
+                                        'title': notif['title']                 if 'title' in notif else "N/A",
+                                        'description': notif['description']     if 'description' in notif else "N/A",
+                                        'position': notif['position']           if 'position' in notif else "N/A"
+                                    }
+                                    # print(f"Found deprecated cypher : [{notif['code']}] - {notif['description']}")
+                                    deprecated_queries.append(result_row)
+                    except neo4j.exceptions.ClientError as e:
+                        # print(dir(e))
+                        # print(f"Failed query : {e}")
+                        result_row= {
+                            'query_hash': hashlib.md5(query.encode('utf-8')).hexdigest(),
+                            'query': query,
+                            'classification': e.classification,
+                            'category': e.category,
+                            'code': e.code,
+                            'title': e.title,
+                            'message': e.message
+                        }
+                        failed_queries.append(result_row)
+
     return failed_queries, deprecated_queries
 
 def write_output(output_path, output_file_name, output):
-    print(f"Writing output to {output_path}/{output_file_name}")
-    with open(output_path+'/'+output_file_name, 'w', newline='') as output_file:
-        dict_writer = csv.DictWriter(output_file, output[0].keys())
-        dict_writer.writeheader()
-        dict_writer.writerows(output)
+    if len(output) > 0:
+        print(f"Writing output to {output_path}/{output_file_name}")
+        with open(output_path+'/'+output_file_name, 'w', newline='') as output_file:
+            dict_writer = csv.DictWriter(output_file, output[0].keys())
+            dict_writer.writeheader()
+            dict_writer.writerows(output)
 
 if __name__ == '__main__':
     try:
