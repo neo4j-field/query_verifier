@@ -119,6 +119,9 @@ def start_container(neo4j_target_version, neo4j_username, neo4j_password, neo4j_
             print(f"Image {docker_image} not found. Please check the version.")
             exit(1)
         except docker.errors.APIError as e:
+            if "unauthenticated" in str(e).lower():
+                print("Authentication required. Please run `docker login`.")
+                exit(1)
             print(f"Error pulling image {docker_image}: {e}")
             exit(1)
     print(f"Running docker container from image {docker_image}...")
